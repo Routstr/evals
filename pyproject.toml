@@ -1,0 +1,27 @@
+[project]
+name = "evals-wallet"
+version = "0.1.0"
+description = "A Python client for Cashu token REST API endpoints and related evaluation scripts."
+dependencies = [
+    "requests",
+    "pynostr",
+    "python-dotenv",
+]
+requires-python = ">=3.8"
+keywords = ["cashu", "wallet", "api", "client"]
+authors = [
+  { name = "Roo", email = "roo@example.com" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["evals*"]

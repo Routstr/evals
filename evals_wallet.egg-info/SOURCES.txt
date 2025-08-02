@@ -1,0 +1,8 @@
+LICENSE
+README.md
+pyproject.toml
+evals_wallet.egg-info/PKG-INFO
+evals_wallet.egg-info/SOURCES.txt
+evals_wallet.egg-info/dependency_links.txt
+evals_wallet.egg-info/requires.txt
+evals_wallet.egg-info/top_level.txt
