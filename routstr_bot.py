@@ -8,8 +8,10 @@ from pynostr.filters import FiltersList, Filters
 from pynostr.event import EventKind
 from pynostr.key import PrivateKey
 import time
+import math
 import uuid
 from dotenv import load_dotenv
+from wallet import receive_cashu_token, send_cashu_token
 
 # Load environment variables from .env file
 load_dotenv()
@@ -22,16 +24,40 @@ NOSTR_BOT_NSEC = os.getenv("NOSTR_BOT_NSEC")
 ROUTSTR_API_KEY = os.getenv("ROUTSTR_API_KEY")
 MAIN_RELAYS = ["wss://relay.damus.io", "wss://nos.lol"]
 BACKUP_RELAYS = ["wss://multiplexer.huszonegy.world"]
-STATUS_FILE = "routstr_status.json" # File to store last status and event ID
+DATA_FILE = "routstr_data.json" # File to store last status and event ID
+
+# --- Data Management Functions ---
+
+def load_data():
+    """Loads data from the JSON file."""
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, 'r') as f:
+            return json.load(f)
+    return {"cashu_tokens": {}} # Initialize with an empty dictionary for cashu_tokens
+
+def save_data(data):
+    """Saves data to the JSON file."""
+    with open(DATA_FILE, 'w') as f:
+        json.dump(data, f, indent=4)
+
+def increment_token_usage(provider_url: str):
+    """Increments the usage count for a cashu token associated with a provider."""
+    data = load_data()
+    if provider_url in data.get("cashu_tokens", {}) and "count" in data["cashu_tokens"][provider_url]:
+        data["cashu_tokens"][provider_url]["count"] += 1
+        save_data(data)
+        print(f"Incremented usage count for {provider_url} to {data['cashu_tokens'][provider_url]['count']}")
+    else:
+        print(f"Warning: Could not increment count for {provider_url}. Token or count not found.")
 
 # --- Helper Functions ---
 
-def generate_comment(status: str) -> str:
+def generate_comment(status: str, provider_url: str) -> str:
     """Generates a quirky comment based on Routstr's status."""
     if status == "up":
-        return "✅ Routstr is routing! Your Freedom AI Tech is routing requests as usual. \nProvider: `"+ROUTSTR_API_BASE_URL+"` \n"
+        return "✅ Routstr is routing! Your Freedom AI Tech is routing requests as usual. \nProvider: `"+provider_url+"` \n"
     else:
-        return "🔴 Routstr is NOT routing! Fear not, we have other providers. \nProvider: `"+ROUTSTR_API_BASE_URL+"` \n"
+        return "🔴 Routstr is NOT routing! Fear not, we have other providers. \nProvider: `"+provider_url+"` \n"
 
 async def get_latest_nostr_event(public_key: str) -> Event | None:
     """Queries Nostr relays for the latest event from a specific public key with 'routstr-status' tag."""
@@ -75,29 +101,50 @@ async def get_latest_nostr_event(public_key: str) -> Event | None:
     # Run the synchronous function in a thread to avoid blocking the event loop
     return await asyncio.to_thread(_fetch_events_sync)
 
-def get_cheapest_model_above_price(models_data: dict, max_cost_sats: float) -> dict | None:
+def get_cheapest_model_above_price(models_data: list, max_cost_sats: float) -> dict | None:
 
     cheapest_model = None
-    min_prompt_cost_sats = float('inf')
+    cheapest_model_costs = 100000000
 
-    # Assuming a conversion rate of 1 USD = 100,000,000 sats
-    USD_TO_SATS_RATE = 100_000_000
-
-    for model in models_data.get("models", []):
-        pricing = model.get("pricing")
-        if pricing and "prompt" in pricing:
+    for model in models_data:
+        pricing = model.get("sats_pricing")
+        if pricing and "max_cost" in pricing:
             try:
-                prompt_cost_usd = float(pricing["prompt"])
-                prompt_cost_sats = prompt_cost_usd * USD_TO_SATS_RATE
+                max_cost_this_model = float(pricing["max_cost"])
 
-                if prompt_cost_sats > max_cost_sats:
-                    if prompt_cost_sats < min_prompt_cost_sats:
-                        min_prompt_cost_sats = prompt_cost_sats
-                        cheapest_model = model
+                if cheapest_model_costs > max_cost_this_model and max_cost_this_model > max_cost_sats:
+                    cheapest_model_costs = max_cost_this_model
+                    cheapest_model = model
             except ValueError:
                 # Handle cases where prompt price might not be a valid float
                 continue
     return cheapest_model
+    
+async def get_or_create_token(amount: int, provider_url: str):
+    data = load_data()
+    
+    # Check if token exists for this provider
+    if provider_url in data.get("cashu_tokens", {}) and "cashu_token" in data["cashu_tokens"][provider_url]:
+        print(f"Using existing cashu token for {provider_url}")
+        increment_token_usage(provider_url)
+        return data["cashu_tokens"][provider_url]["cashu_token"]
+
+    # If not, create a new one
+    cashu_token_result = send_cashu_token(amount)
+    if cashu_token_result["success"]:
+        cashu_token = cashu_token_result["data"]["token"]
+        # Store the new token and initialize count
+        if "cashu_tokens" not in data:
+            data["cashu_tokens"] = {}
+        data["cashu_tokens"][provider_url] = {"cashu_token": cashu_token, "count": 0}
+        save_data(data)
+        print(f"Created and stored new cashu token for {provider_url}")
+        increment_token_usage(provider_url) # Increment after creation
+        return cashu_token
+    else:
+        print(f"Failed to create cashu token: {cashu_token_result.get('error', 'Unknown error')}")
+        return ""
+
 
 async def get_witty_bitcoin_comment(note_content: str, custom_addon: str, provider_url: str) -> tuple[str, str]:
     """
@@ -106,6 +153,7 @@ async def get_witty_bitcoin_comment(note_content: str, custom_addon: str, provid
     """
     current_status = "down"  # Assume down by default
     ai_response_content = ""
+    models_count = 0
 
     try:
         # Create AI prompt including the latest event content if available
@@ -115,20 +163,35 @@ async def get_witty_bitcoin_comment(note_content: str, custom_addon: str, provid
             provider_url, 
             timeout=10
             )
-        models = response
-        print(models)
+        models_data = {}
+        if response.ok and response.status_code == 200:
+            # API is working, extract AI response content
+            try:
+                provider_data = response.json()
+                if 'models' in provider_data and provider_data['models']:
+                    models_data = provider_data['models']
+            except json.JSONDecodeError:
+                models_data = {}
+        else:
+            print(f"API returned non-OK status: {response.status_code}. Response text: {response.text}")
+
+        models_count = len(models_data)
+        model = get_cheapest_model_above_price(models_data, 10)
+        max_cost = int(math.ceil(model['sats_pricing']['max_cost']))
+        print(f"Costs for model {model['id']}: ", max_cost, " total no. of models: ", models_count)
+
+        cashu_token = get_or_create_token(max_cost+5, provider_url)
 
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {ROUTSTR_API_KEY}",
+            "x-cashu": f"{cashu_token}",
             "Accept-Encoding": "identity"
         }
         response = requests.post(
-            provider_url,
+            provider_url + "/v1/chat/completions",
             headers=headers,
             json={
-                "model": "nousresearch/hermes-2-pro-llama-3-8b",
-                # "model": "x-ai/grok-3-mini-beta",
+                "model": model['id'],
                 "messages": [{"role": "user", "content": base_prompt}]
             },
             timeout=10
@@ -141,6 +204,14 @@ async def get_witty_bitcoin_comment(note_content: str, custom_addon: str, provid
                 ai_data = response.json()
                 if 'choices' in ai_data and ai_data['choices']:
                     ai_response_content = ai_data['choices'][0]['message']['content']
+                total_costs = ai_data['usage']['prompt_tokens'] * model['sats_pricing']['prompt'] + ai_data['usage']['completion_tokens'] * model['sats_pricing']['completion']
+                print(ai_data['usage'])
+                print(total_costs)
+                if response.headers["x-cashu"]:
+                    result = receive_cashu_token(response.headers["x-cashu"])
+                    if not result['success']:
+                        print("receivin g " , response.headers["x-cashu"], end=" ")
+                        print(result)
             except json.JSONDecodeError:
                 ai_response_content = "AI response received but couldn't parse content."
         else:
@@ -220,15 +291,41 @@ async def main():
     if latest_event:
         note_content = latest_event.content
 
-    ai_response_content, current_status = await get_witty_bitcoin_comment(note_content, " Bitcoin relates to it. ")
+    proxies = [
+       "https://ai.redsh1ft.com",
+       "https://staging.routstr.com",
+       "https://api.routstr.com",
+       "https://routstr.otrta.me",
+       "https://privateprovider.xyz",
+       "https://routstr.rewolf.dev" 
+    ]
 
-    print(f"Routstr current status: {current_status}")
+    prompts = [
+        " Bitcoin relates to it. ",
+        " Bitcoin Lightning Network is the answer to all. ",
+        " Tron and Justin Sun fix everything. ",
+        " Bitcoin Cashu payments is best new thing. ",
+        " Vitalik and Ethereum can do better. ",
+        " Cardano is the best answer to everything. ",
+        " Solana is the fastest chain ever. ",
+        " Bitcoin relates to it. "
+    ]
 
-    # Generate event content (use AI response if available, otherwise fallback to generated comment)
-    if ai_response_content:
-        event_content = ai_response_content+"\n\n"+generate_comment(current_status)
-    else:
-        event_content = generate_comment(current_status)
+    statuses = ""
+    proofs = ""
+
+    # for n in range(len(proxies)):
+    for n in range(1):
+        ai_response_content, current_status = await get_witty_bitcoin_comment(
+            note_content, prompts[n], 
+            proxies[n]
+            )
+        # Generate event content (use AI response if available, otherwise fallback to generated comment)
+        if ai_response_content:
+            statuses += ai_response_content+"\n\n"
+            proofs = generate_comment(current_status, proxies[n])
+        else:
+            proofs += generate_comment(current_status, proxies[n])+"\n"
 
     # Set up tags
     tags = []
@@ -239,6 +336,8 @@ async def main():
             ["q", latest_event.id, "wss://relay.damus.io", latest_event.pubkey],  # Quote tag with proper format
             # ["p", '4ad6fa2d16e2a9b576c863b4cf7404a70d4dc320c0c447d10ad6ff58993eacc8']  # Tag the original author
         ])
+
+    print(statuses + "\n\n" + proofs)
 
     # new_event_id = await publish_nostr_event(event_content+"nostr:"+latest_event.bech32(), tags)
 

@@ -10,12 +10,12 @@ class CashuWalletClient:
     Provides functions to send, receive, and check balance of Cashu tokens.
     """
     
-    def __init__(self, base_url: str = "http://localhost:3000"):
+    def __init__(self, base_url: str = "http://localhost:3002"):
         """
         Initialize the Cashu wallet client.
         
         Args:
-            base_url: Base URL of the Cashu API server (default: http://localhost:3000)
+            base_url: Base URL of the Cashu API server (default: http://localhost:3002)
         """
         self.base_url = base_url.rstrip('/')
         self.session = requests.Session()
@@ -76,7 +76,7 @@ class CashuWalletClient:
         
         Args:
             amount: Amount to send (must be positive integer)
-            mint_url: Optional mint URL (uses default if not provided)
+            mint_url: Optional mint URL (uses default if not provided). If None, the mint with the highest balance will be used.
             unit: Token unit (default: 'sat')
             
         Returns:
@@ -93,13 +93,31 @@ class CashuWalletClient:
                 'timestamp': datetime.now().isoformat()
             }
         
+        if mint_url is None:
+            balance_result = self.get_balance()
+            if balance_result.get('success') and 'mintBalances' in balance_result.get('data', {}):
+                mint_balances = balance_result['data']['mintBalances']
+                if mint_balances:
+                    highest_balance_mint = max(mint_balances, key=lambda x: x['balance'])
+                    mint_url = highest_balance_mint['mintUrl']
+                else:
+                    return {
+                        'success': False,
+                        'message': 'No mint balances found to determine highest balance mint.',
+                        'timestamp': datetime.now().isoformat()
+                    }
+            else:
+                return {
+                    'success': False,
+                    'message': 'Failed to retrieve balance or no mint data available to determine highest balance mint.',
+                    'timestamp': datetime.now().isoformat()
+                }
+
         payload = {
             'amount': amount,
-            'unit': unit
+            'unit': unit,
+            'mintUrl': mint_url
         }
-        
-        if mint_url:
-            payload['mintUrl'] = mint_url
         
         return self._make_request('POST', '/send', payload)
     
@@ -152,13 +170,13 @@ class CashuWalletClient:
 
 
 # Convenience functions for direct usage
-def create_wallet_client(base_url: str = "http://localhost:3000") -> CashuWalletClient:
+def create_wallet_client(base_url: str = "http://localhost:3002") -> CashuWalletClient:
     """Create a new CashuWalletClient instance."""
     return CashuWalletClient(base_url)
 
 
 def send_cashu_token(amount: int, mint_url: Optional[str] = None, unit: str = 'sat', 
-                    base_url: str = "http://localhost:3000") -> Dict[str, Any]:
+                    base_url: str = "http://localhost:3002") -> Dict[str, Any]:
     """
     Convenience function to send a Cashu token.
     
@@ -176,7 +194,7 @@ def send_cashu_token(amount: int, mint_url: Optional[str] = None, unit: str = 's
 
 
 def receive_cashu_token(token: str, mint_url: Optional[str] = None, unit: Optional[str] = None,
-                       base_url: str = "http://localhost:3000") -> Dict[str, Any]:
+                       base_url: str = "http://localhost:3002") -> Dict[str, Any]:
     """
     Convenience function to receive a Cashu token.
     
@@ -193,7 +211,7 @@ def receive_cashu_token(token: str, mint_url: Optional[str] = None, unit: Option
     return client.receive_token(token, mint_url, unit)
 
 
-def get_wallet_balance(base_url: str = "http://localhost:3000") -> Dict[str, Any]:
+def get_wallet_balance(base_url: str = "http://localhost:3002") -> Dict[str, Any]:
     """
     Convenience function to get wallet balance.
     
@@ -212,15 +230,15 @@ if __name__ == "__main__":
     # Example of how to use the wallet client
     
     # Create a client instance
-    wallet = CashuWalletClient("http://localhost:3000")
+    wallet = CashuWalletClient("http://localhost:3002")
     
     # Check current balance
     balance_result = wallet.get_balance()
     print("Current balance:", balance_result)
-    
+
     # Send tokens (example)
-    # send_result = wallet.send_token(100)
-    # print("Send result:", send_result)
+    send_result = wallet.send_token(10)
+    print("Send result:", send_result)
     
     # Receive tokens (example)
     # receive_result = wallet.receive_token("cashuAeyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiJ9...")
