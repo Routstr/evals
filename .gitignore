@@ -10,3 +10,4 @@ venv/
 *.egg-info/
 .env
 .DS_Store
+routstr_data.json

@@ -18,14 +18,34 @@ load_dotenv()
 
 # --- Configuration ---
 # Placeholder: User should set this in their .env file
-ROUTSTR_API_BASE_URL = os.getenv("ROUTSTR_API_URL", "https://api.example.com")
-ROUTSTR_API_CHAT_URL = ROUTSTR_API_BASE_URL + "/v1/chat/completions"
 NOSTR_BOT_NSEC = os.getenv("NOSTR_BOT_NSEC")
-ROUTSTR_API_KEY = os.getenv("ROUTSTR_API_KEY")
 MAIN_RELAYS = ["wss://relay.damus.io", "wss://nos.lol"]
 BACKUP_RELAYS = ["wss://multiplexer.huszonegy.world"]
 DATA_FILE = "routstr_data.json" # File to store last status and event ID
 
+PROXIES = [
+    "https://api.routstr.com",
+    "https://ai.redsh1ft.com",
+    "https://staging.routstr.com",
+    "https://privateprovider.xyz",
+    "https://routstr.rewolf.dev", 
+    "http://localhost:8000",
+    "https://routstr.otrta.me"
+]
+
+PROMPTS = [
+    " Bitcoin relates to it. ",
+    " Bitcoin Lightning Network is the answer to all. ",
+    " Tron and Justin Sun fix everything. ",
+    " Bitcoin Cashu payments is best new thing. ",
+    " Vitalik and Ethereum can do better. ",
+    " Cardano is the best answer to everything. ",
+    " Solana is the fastest chain ever. ",
+    " Bitcoin relates to it. "
+]
+CHEAPEST_MODELS_ABOVE=5
+NUMBER_OF_PROXIES_TO_TEST=5
+DEFAULT_MAX_COSTS_RANGE=10
 # --- Data Management Functions ---
 
 def load_data():
@@ -40,13 +60,19 @@ def save_data(data):
     with open(DATA_FILE, 'w') as f:
         json.dump(data, f, indent=4)
 
-def increment_token_usage(provider_url: str):
+def get_cashu_balance(provider_url: str) -> int | None:
+    """Fetches the cashu token balance for a given provider URL."""
+    data = load_data()
+    return data.get("cashu_tokens", {}).get(provider_url, {}).get("balance")
+
+def increment_token_usage_and_store_balance(provider_url: str, balance: int):
     """Increments the usage count for a cashu token associated with a provider."""
     data = load_data()
     if provider_url in data.get("cashu_tokens", {}) and "count" in data["cashu_tokens"][provider_url]:
         data["cashu_tokens"][provider_url]["count"] += 1
+        data["cashu_tokens"][provider_url]["balance"] = balance
         save_data(data)
-        print(f"Incremented usage count for {provider_url} to {data['cashu_tokens'][provider_url]['count']}")
+        # print(f"Incremented usage count for {provider_url} to {data['cashu_tokens'][provider_url]['count']}")
     else:
         print(f"Warning: Could not increment count for {provider_url}. Token or count not found.")
 
@@ -55,9 +81,9 @@ def increment_token_usage(provider_url: str):
 def generate_comment(status: str, provider_url: str) -> str:
     """Generates a quirky comment based on Routstr's status."""
     if status == "up":
-        return "✅ Routstr is routing! Your Freedom AI Tech is routing requests as usual. \nProvider: `"+provider_url+"` \n"
+        return "\n✅ Provider: `"+provider_url+"` is routing AI queries as expected. \n"
     else:
-        return "🔴 Routstr is NOT routing! Fear not, we have other providers. \nProvider: `"+provider_url+"` \n"
+        return "\n🔴 Provider: `"+provider_url+"` is NOT routing AI queries rn, use alternatives. \n"
 
 async def get_latest_nostr_event(public_key: str) -> Event | None:
     """Queries Nostr relays for the latest event from a specific public key with 'routstr-status' tag."""
@@ -71,7 +97,7 @@ async def get_latest_nostr_event(public_key: str) -> Event | None:
             # Create filters to get events from the specific public key with routstr-status tag
             filters = FiltersList([Filters(
                 kinds=[EventKind.TEXT_NOTE],
-                limit=10
+                limit=21
             )])
             
             subscription_id = uuid.uuid1().hex
@@ -87,11 +113,12 @@ async def get_latest_nostr_event(public_key: str) -> Event | None:
             latest_event = None
             while relay_manager.message_pool.has_events():
                 event_msg = relay_manager.message_pool.get_event()
-                if not latest_event or event_msg.event.created_at > latest_event.created_at:
-                    latest_event = event_msg.event
+                if not latest_event or len(event_msg.event.content.split()) < len(latest_event.content.split()):
+                    if len(event_msg.event.content.split()) > 5:
+                        latest_event = event_msg.event
             
             relay_manager.close_all_relay_connections()
-            
+
             return latest_event
             
         except Exception as e:
@@ -101,7 +128,7 @@ async def get_latest_nostr_event(public_key: str) -> Event | None:
     # Run the synchronous function in a thread to avoid blocking the event loop
     return await asyncio.to_thread(_fetch_events_sync)
 
-def get_cheapest_model_above_price(models_data: list, max_cost_sats: float) -> dict | None:
+def get_cheapest_model_above_price(models_data: list, max_cost_sats: float, max_costs_range: float, retry_if_not_found: bool) -> dict | None:
 
     cheapest_model = None
     cheapest_model_costs = 100000000
@@ -111,13 +138,17 @@ def get_cheapest_model_above_price(models_data: list, max_cost_sats: float) -> d
         if pricing and "max_cost" in pricing:
             try:
                 max_cost_this_model = float(pricing["max_cost"])
+                total_inference_costs = float(pricing['prompt'])+float(pricing['completion'])
 
-                if cheapest_model_costs > max_cost_this_model and max_cost_this_model > max_cost_sats:
-                    cheapest_model_costs = max_cost_this_model
-                    cheapest_model = model
+                if max_cost_this_model < max_cost_sats+max_costs_range and max_cost_this_model >= max_cost_sats:
+                    if cheapest_model_costs > total_inference_costs:
+                        cheapest_model_costs = total_inference_costs
+                        cheapest_model = model
             except ValueError:
                 # Handle cases where prompt price might not be a valid float
                 continue
+    if not cheapest_model and retry_if_not_found:
+        cheapest_model = get_cheapest_model_above_price(models_data, 0, 10000, False)
     return cheapest_model
     
 async def get_or_create_token(amount: int, provider_url: str):
@@ -125,8 +156,6 @@ async def get_or_create_token(amount: int, provider_url: str):
     
     # Check if token exists for this provider
     if provider_url in data.get("cashu_tokens", {}) and "cashu_token" in data["cashu_tokens"][provider_url]:
-        print(f"Using existing cashu token for {provider_url}")
-        increment_token_usage(provider_url)
         return data["cashu_tokens"][provider_url]["cashu_token"]
 
     # If not, create a new one
@@ -139,14 +168,13 @@ async def get_or_create_token(amount: int, provider_url: str):
         data["cashu_tokens"][provider_url] = {"cashu_token": cashu_token, "count": 0}
         save_data(data)
         print(f"Created and stored new cashu token for {provider_url}")
-        increment_token_usage(provider_url) # Increment after creation
         return cashu_token
     else:
         print(f"Failed to create cashu token: {cashu_token_result.get('error', 'Unknown error')}")
         return ""
 
 
-async def get_witty_bitcoin_comment(note_content: str, custom_addon: str, provider_url: str) -> tuple[str, str]:
+async def get_witty_bitcoin_comment(note_content: str, custom_addon: str, provider_url: str) -> tuple[str, str, str]:
     """
     Generates a witty Bitcoin-related comment using the Routstr AI API.
     Returns the AI response content and the API status ("up" or "down").
@@ -154,11 +182,12 @@ async def get_witty_bitcoin_comment(note_content: str, custom_addon: str, provid
     current_status = "down"  # Assume down by default
     ai_response_content = ""
     models_count = 0
+    model_id = "Not available"
 
     try:
         # Create AI prompt including the latest event content if available
         base_prompt = f"Here's a nostr note someone made: '{note_content}'. Add a witty comment about how '{custom_addon}'. Keep it short and concise, within 2 sentences. No hashtags. "
-        
+
         response = requests.get(
             provider_url, 
             timeout=10
@@ -176,17 +205,28 @@ async def get_witty_bitcoin_comment(note_content: str, custom_addon: str, provid
             print(f"API returned non-OK status: {response.status_code}. Response text: {response.text}")
 
         models_count = len(models_data)
-        model = get_cheapest_model_above_price(models_data, 10)
+        model = get_cheapest_model_above_price(models_data, CHEAPEST_MODELS_ABOVE, DEFAULT_MAX_COSTS_RANGE, True)
         max_cost = int(math.ceil(model['sats_pricing']['max_cost']))
-        print(f"Costs for model {model['id']}: ", max_cost, " total no. of models: ", models_count)
+        model_id = model['id']
+        print(f"Costs for model {model['id']}: ", model['sats_pricing']['max_cost'], " total no. of models: ", models_count)
 
-        cashu_token = get_or_create_token(max_cost+5, provider_url)
+        cashu_token = await get_or_create_token(max_cost+15, provider_url)
 
-        headers = {
-            "Content-Type": "application/json",
-            "x-cashu": f"{cashu_token}",
-            "Accept-Encoding": "identity"
-        }
+        x_cashu = False
+
+        if x_cashu:
+            headers = {
+                "Content-Type": "application/json",
+                "x-cashu": f"{cashu_token}",
+                "Accept-Encoding": "identity"
+            }
+        else:
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {cashu_token}",
+                "Accept-Encoding": "identity"
+            } 
+
         response = requests.post(
             provider_url + "/v1/chat/completions",
             headers=headers,
@@ -206,13 +246,65 @@ async def get_witty_bitcoin_comment(note_content: str, custom_addon: str, provid
                     ai_response_content = ai_data['choices'][0]['message']['content']
                 total_costs = ai_data['usage']['prompt_tokens'] * model['sats_pricing']['prompt'] + ai_data['usage']['completion_tokens'] * model['sats_pricing']['completion']
                 print(ai_data['usage'])
-                print(total_costs)
-                if response.headers["x-cashu"]:
+                if (ai_data['usage']['prompt_tokens'] > 1000):
+                    print("TOTAL WORDS: ", len(base_prompt.split()))
+                    print(base_prompt)
+                print("ESTIAMTED COSTS: ", total_costs)
+                if x_cashu and response.headers["x-cashu"]:
                     result = receive_cashu_token(response.headers["x-cashu"])
                     if not result['success']:
                         print("receivin g " , response.headers["x-cashu"], end=" ")
                         print(result)
+                else: 
+                    response = requests.get(
+                        provider_url + "/v1/wallet/info",
+                        headers=headers,
+                        timeout=10
+                    )
+                    if response.ok:
+                        old_balance = get_cashu_balance(provider_url)
+                        balance = response.json()['balance']
+                        if old_balance == None:
+                            old_balance = (max_cost+15)*1000
+                            actual_costs = old_balance - balance
+                        else:
+                            actual_costs = old_balance - balance
+                        print(f'Old Balance: {old_balance} New Balance: {balance} - ACTUAL COSTS: ', actual_costs)
+                        # response = requests.get(
+                        #     provider_url, 
+                        #     timeout=10
+                        #     )
+                        # models_data = {}
+                        # if response.ok and response.status_code == 200:
+                        #     # API is working, extract AI response content
+                        #     try:
+                        #         provider_data = response.json()
+                        #         if 'models' in provider_data and provider_data['models']:
+                        #             models_data = provider_data['models']
+                        #     except json.JSONDecodeError:
+                        #         models_data = {}
+                        # else:
+                        #     print(f"API returned non-OK status: {response.status_code}. Response text: {response.text}")
+                        # print([modelX['sats_pricing']['max_cost'] for modelX in models_data if model['id']==modelX['id']])
+                        if(balance % 1000 < 21):
+                            refund_response = response = requests.post(
+                                provider_url + "/v1/wallet/refund",
+                                headers=headers,
+                                timeout=10
+                            )
+                            if refund_response.ok:
+                                print(refund_response.json())
+                            else:
+                                print(refund_response.status_code)
+                                print(refund_response.text)
+
+                            print("GOOD TO REFUND")
+                        increment_token_usage_and_store_balance(provider_url, balance)
+                    else:
+                        print(response.status_code)
+                        print(response.text)
             except json.JSONDecodeError:
+                print(json.JSONDecodeError.msg)
                 ai_response_content = "AI response received but couldn't parse content."
         else:
             print(f"API returned non-OK status: {response.status_code}. Response text: {response.text}")
@@ -221,7 +313,7 @@ async def get_witty_bitcoin_comment(note_content: str, custom_addon: str, provid
         print(f"Routstr API unreachable: {e}")
         current_status = "down"
     
-    return ai_response_content, current_status
+    return ai_response_content, current_status, model_id
 
 async def publish_nostr_event(event_content: str, tags: list[list[str]] = None, relay_manager: RelayManager = None) -> str | None:
     """Publishes a Nostr event to configured relays."""
@@ -288,64 +380,60 @@ async def main():
     ai_response_content = ""
 
     note_content = "Error fetching event"
-    if latest_event:
-        note_content = latest_event.content
-
-    proxies = [
-       "https://ai.redsh1ft.com",
-       "https://staging.routstr.com",
-       "https://api.routstr.com",
-       "https://routstr.otrta.me",
-       "https://privateprovider.xyz",
-       "https://routstr.rewolf.dev" 
-    ]
-
-    prompts = [
-        " Bitcoin relates to it. ",
-        " Bitcoin Lightning Network is the answer to all. ",
-        " Tron and Justin Sun fix everything. ",
-        " Bitcoin Cashu payments is best new thing. ",
-        " Vitalik and Ethereum can do better. ",
-        " Cardano is the best answer to everything. ",
-        " Solana is the fastest chain ever. ",
-        " Bitcoin relates to it. "
-    ]
-
-    statuses = ""
-    proofs = ""
-
-    # for n in range(len(proxies)):
-    for n in range(1):
-        ai_response_content, current_status = await get_witty_bitcoin_comment(
-            note_content, prompts[n], 
-            proxies[n]
-            )
-        # Generate event content (use AI response if available, otherwise fallback to generated comment)
-        if ai_response_content:
-            statuses += ai_response_content+"\n\n"
-            proofs = generate_comment(current_status, proxies[n])
-        else:
-            proofs += generate_comment(current_status, proxies[n])+"\n"
-
     # Set up tags
     tags = []
-    
-    # If we have a previous event, quote it instead of replying to it
     if latest_event:
+        note_content = latest_event.content
+        statuses = []
+        proofs = ""
+        print(latest_event.bech32())
+        print(len(note_content.split()))
+        print(note_content)
+
+        # for n in range(len(proxies)):
+        for n in range(NUMBER_OF_PROXIES_TO_TEST):
+            ai_response_content, current_status, model_id = await get_witty_bitcoin_comment(
+                note_content, PROMPTS[n], 
+                PROXIES[n]
+                )
+            # Generate event content (use AI response if available, otherwise fallback to generated comment)
+            if ai_response_content:
+                proofs = proofs + "Provider: "+ PROXIES[n].replace("http://","").replace("https://","") + " (" + model_id + "): \n" + ai_response_content+"\n\n"
+                note_content = ai_response_content
+                statuses.append(current_status)
+            else:
+                proofs = proofs + "Provider: "+ PROXIES[n].replace("http://","").replace("https://","") + " (" + model_id + "): \n" + "AI Response Failed!" +"\n\n"
+                statuses.append(current_status)
+
+    
         tags.extend([
             ["q", latest_event.id, "wss://relay.damus.io", latest_event.pubkey],  # Quote tag with proper format
             # ["p", '4ad6fa2d16e2a9b576c863b4cf7404a70d4dc320c0c447d10ad6ff58993eacc8']  # Tag the original author
         ])
 
-    print(statuses + "\n\n" + proofs)
+        down_list = []
+        up_list = []
+        for n, s in enumerate(statuses):
+            if s == "down":
+                down_list.append(PROXIES[n])
+            else:
+                up_list.append(PROXIES[n])
 
-    # new_event_id = await publish_nostr_event(event_content+"nostr:"+latest_event.bech32(), tags)
+        event_content = ("✅ Providers working as expected:" + "\n".join(up_list)) if len(up_list) > 0 else ""
+        event_content += ("🔴 Providers with issues:" + "\n".join(down_list)) if len(down_list) > 0 else ""
+        event_content += "\nProof: \nA recent Nostr note: '" + note_content + "'\nNote ID: "+ latest_event.bech32() + "\n\nAI responses: \n" + proofs
 
-    # if new_event_id:
-    #     print(f"Published new status event: {new_event_id}")
-    #     # Save status for reference (keeping this for backward compatibility)
-    # else:
-    #     print("Failed to publish Nostr event.")
+        new_event_id = await publish_nostr_event(event_content+"nostr:"+latest_event.bech32(), tags)
+
+        if new_event_id:
+            print(f"Published new status event: {new_event_id}")
+            # Save status for reference (keeping this for backward compatibility)
+        else:
+            print("Failed to publish Nostr event.")
+
+
+    else:
+        print("NOSTR DIDN'T WOWKR")
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -118,6 +118,7 @@ class CashuWalletClient:
             'unit': unit,
             'mintUrl': mint_url
         }
+        print(payload)
         
         return self._make_request('POST', '/send', payload)
     
