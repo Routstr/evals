@@ -22,15 +22,16 @@ NOSTR_BOT_NSEC = os.getenv("NOSTR_BOT_NSEC")
 MAIN_RELAYS = ["wss://relay.damus.io", "wss://nos.lol"]
 BACKUP_RELAYS = ["wss://multiplexer.huszonegy.world"]
 DATA_FILE = "routstr_data.json" # File to store last status and event ID
+PRODUCTION = os.getenv("PRODUCTION")
 
 PROXIES = [
     "https://api.routstr.com",
     "https://ai.redsh1ft.com",
     "https://staging.routstr.com",
     "https://privateprovider.xyz",
+    "https://routstr.otrta.me"
     "https://routstr.rewolf.dev", 
     "http://localhost:8000",
-    "https://routstr.otrta.me"
 ]
 
 PROMPTS = [
@@ -471,14 +472,16 @@ async def main():
         event_content += ("\n🔴 Providers that are down:" + "\n " +"\n ".join(down_list)) if len(down_list) > 0 else ""
         event_content += "\n\nProof \n\nA recent Nostr note: \n'" + note_content + "'\nNote ID: "+ latest_event.bech32() + "\n\nAIs responses: \n" + proofs
 
-        # print(event_content)
-        new_event_id = await publish_nostr_event(event_content+"nostr:"+latest_event.bech32(), tags)
+        if (PRODUCTION=='true'):
+            new_event_id = await publish_nostr_event(event_content+"nostr:"+latest_event.bech32(), tags)
 
-        if new_event_id:
-            print(f"Published new status event: {new_event_id}")
-            # Save status for reference (keeping this for backward compatibility)
+            if new_event_id:
+                print(f"Published new status event: {new_event_id}")
+                # Save status for reference (keeping this for backward compatibility)
+            else:
+                print("Failed to publish Nostr event.")
         else:
-            print("Failed to publish Nostr event.")
+            print(event_content)
 
     else:
         print("NOSTR DIDN'T WOWKR")
