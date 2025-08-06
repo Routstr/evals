@@ -44,7 +44,7 @@ PROMPTS = [
     " Bitcoin relates to it. "
 ]
 CHEAPEST_MODELS_ABOVE=5
-NUMBER_OF_PROXIES_TO_TEST=5
+NUMBER_OF_PROXIES_TO_TEST=2
 DEFAULT_MAX_COSTS_RANGE=10
 # --- Data Management Functions ---
 
@@ -173,6 +173,14 @@ async def get_or_create_token(amount: int, provider_url: str):
         print(f"Failed to create cashu token: {cashu_token_result.get('error', 'Unknown error')}")
         return ""
 
+async def delete_token(provider_url: str):
+    data = load_data()
+    if "cashu_tokens" in data and provider_url in data["cashu_tokens"]:
+        del data["cashu_tokens"][provider_url]
+        save_data(data)
+        print(f"Deleted cashu token for {provider_url}")
+    else:
+        print(f"No cashu token found for {provider_url} to delete.")
 
 async def get_witty_bitcoin_comment(note_content: str, custom_addon: str, provider_url: str) -> tuple[str, str, str]:
     """
@@ -183,6 +191,8 @@ async def get_witty_bitcoin_comment(note_content: str, custom_addon: str, provid
     ai_response_content = ""
     models_count = 0
     model_id = "Not available"
+    cost_check = 'unknown' 
+    refund_status = 'unknown'
 
     try:
         # Create AI prompt including the latest event content if available
@@ -201,8 +211,11 @@ async def get_witty_bitcoin_comment(note_content: str, custom_addon: str, provid
                     models_data = provider_data['models']
             except json.JSONDecodeError:
                 models_data = {}
+                print(f"Could not decode models data from JSON. Provider URL: {provider_url}")
+                return ai_response_content, current_status, model_id, cost_check, refund_status
         else:
-            print(f"API returned non-OK status: {response.status_code}. Response text: {response.text}")
+            print(f"API returned non-OK status: {response.status_code}. Provider URL: {provider_url}")
+            return ai_response_content, current_status, model_id, cost_check, refund_status
 
         models_count = len(models_data)
         model = get_cheapest_model_above_price(models_data, CHEAPEST_MODELS_ABOVE, DEFAULT_MAX_COSTS_RANGE, True)
@@ -240,6 +253,8 @@ async def get_witty_bitcoin_comment(note_content: str, custom_addon: str, provid
         if response.ok and response.status_code == 200:
             # API is working, extract AI response content
             current_status = "up"
+            refund_status = "unknown"
+            cost_check = "good"
             try:
                 ai_data = response.json()
                 if 'choices' in ai_data and ai_data['choices']:
@@ -249,13 +264,29 @@ async def get_witty_bitcoin_comment(note_content: str, custom_addon: str, provid
                 if (ai_data['usage']['prompt_tokens'] > 1000):
                     print("TOTAL WORDS: ", len(base_prompt.split()))
                     print(base_prompt)
-                print("ESTIAMTED COSTS: ", total_costs)
-                if x_cashu and response.headers["x-cashu"]:
-                    result = receive_cashu_token(response.headers["x-cashu"])
-                    if not result['success']:
-                        print("receivin g " , response.headers["x-cashu"], end=" ")
-                        print(result)
-                else: 
+                print("ESTIAMTED COSTS: ", total_costs*1000)
+                if x_cashu:
+                    refund_amount = 0
+                    if response.headers["x-cashu"]:
+                        result = receive_cashu_token(response.headers["x-cashu"])
+                        if not result['success']:
+                            if result['amount'] and result['amount'] != '':
+                                refund_amount = result['amount']
+                            print("receivin g " , response.headers["x-cashu"], end=" ")
+                            print(result)
+                        else: 
+                            refund_amount = result['data']['importedAmount']
+                        old_balance = get_cashu_balance(provider_url)
+                        if old_balance == None:
+                            old_balance = (max_cost+15)*1000
+                            actual_costs = old_balance - refund_amount
+                        else:
+                            actual_costs = old_balance - refund_amount
+                        if ( actual_costs - total_costs*1000 > 1 or actual_costs - total_costs*1000 < 0 ):
+                            cost_check = "bad "+ str(actual_costs - total_costs*1000)
+                    else:
+                        refund_status = "failed"
+                else:
                     response = requests.get(
                         provider_url + "/v1/wallet/info",
                         headers=headers,
@@ -270,22 +301,9 @@ async def get_witty_bitcoin_comment(note_content: str, custom_addon: str, provid
                         else:
                             actual_costs = old_balance - balance
                         print(f'Old Balance: {old_balance} New Balance: {balance} - ACTUAL COSTS: ', actual_costs)
-                        # response = requests.get(
-                        #     provider_url, 
-                        #     timeout=10
-                        #     )
-                        # models_data = {}
-                        # if response.ok and response.status_code == 200:
-                        #     # API is working, extract AI response content
-                        #     try:
-                        #         provider_data = response.json()
-                        #         if 'models' in provider_data and provider_data['models']:
-                        #             models_data = provider_data['models']
-                        #     except json.JSONDecodeError:
-                        #         models_data = {}
-                        # else:
-                        #     print(f"API returned non-OK status: {response.status_code}. Response text: {response.text}")
-                        # print([modelX['sats_pricing']['max_cost'] for modelX in models_data if model['id']==modelX['id']])
+                        if ( actual_costs - total_costs*1000 > 1 or  actual_costs - total_costs*1000 < 0 ):
+                            cost_check = "bad "+ str(actual_costs - total_costs*1000)
+
                         if(balance % 1000 < 21):
                             refund_response = response = requests.post(
                                 provider_url + "/v1/wallet/refund",
@@ -294,12 +312,24 @@ async def get_witty_bitcoin_comment(note_content: str, custom_addon: str, provid
                             )
                             if refund_response.ok:
                                 print(refund_response.json())
+                                result = receive_cashu_token(refund_response.json()["token"])
+                                if not result['success']:
+                                    if result['amount'] and result['amount'] != '':
+                                        refund_amount = result['amount']
+                                    print("receivin failed " , refund_response.json(), end=" ")
+                                    print(result)
+                                else:
+                                    refund_amount = result['data']['importedAmount']
+                                    await delete_token(provider_url)
+                                    refund_status = "success"
+                                if (refund_amount*1000 != balance - balance % 1000):
+                                    refund_status = "failed"
                             else:
+                                refund_status = "failed"
                                 print(refund_response.status_code)
                                 print(refund_response.text)
-
-                            print("GOOD TO REFUND")
-                        increment_token_usage_and_store_balance(provider_url, balance)
+                        else:
+                            increment_token_usage_and_store_balance(provider_url, balance)
                     else:
                         print(response.status_code)
                         print(response.text)
@@ -313,7 +343,7 @@ async def get_witty_bitcoin_comment(note_content: str, custom_addon: str, provid
         print(f"Routstr API unreachable: {e}")
         current_status = "down"
     
-    return ai_response_content, current_status, model_id
+    return ai_response_content, current_status, model_id, cost_check, refund_status
 
 async def publish_nostr_event(event_content: str, tags: list[list[str]] = None, relay_manager: RelayManager = None) -> str | None:
     """Publishes a Nostr event to configured relays."""
@@ -386,25 +416,25 @@ async def main():
         note_content = latest_event.content
         statuses = []
         proofs = ""
-        print(latest_event.bech32())
-        print(len(note_content.split()))
-        print(note_content)
+        refunds_checks = []
+        cost_checks = []
 
         # for n in range(len(proxies)):
         for n in range(NUMBER_OF_PROXIES_TO_TEST):
-            ai_response_content, current_status, model_id = await get_witty_bitcoin_comment(
+            ai_response_content, current_status, model_id, cost_check, refund_status = await get_witty_bitcoin_comment(
                 note_content, PROMPTS[n], 
                 PROXIES[n]
                 )
+            cost_checks.append(cost_check)
+            refunds_checks.append(refund_status)
             # Generate event content (use AI response if available, otherwise fallback to generated comment)
             if ai_response_content:
-                proofs = proofs + "Provider: "+ PROXIES[n].replace("http://","").replace("https://","") + " (" + model_id + "): \n" + ai_response_content+"\n\n"
+                proofs = proofs + ai_response_content + "\nFrom provider: "+ PROXIES[n].replace("http://","").replace("https://","") + " (" + model_id + ") \n"+"\n"
                 note_content = ai_response_content
                 statuses.append(current_status)
             else:
-                proofs = proofs + "Provider: "+ PROXIES[n].replace("http://","").replace("https://","") + " (" + model_id + "): \n" + "AI Response Failed!" +"\n\n"
+                proofs = proofs + "AI Response Failed!" + "\nFrom provider: "+ PROXIES[n].replace("http://","").replace("https://","") + " (" + model_id + ") \n" +"\n"
                 statuses.append(current_status)
-
     
         tags.extend([
             ["q", latest_event.id, "wss://relay.damus.io", latest_event.pubkey],  # Quote tag with proper format
@@ -413,24 +443,36 @@ async def main():
 
         down_list = []
         up_list = []
+        warning_list = []
         for n, s in enumerate(statuses):
             if s == "down":
                 down_list.append(PROXIES[n])
             else:
-                up_list.append(PROXIES[n])
+                provider_url = '`' + PROXIES[n] + '`'
+                if (cost_checks[n] == 'good' and refunds_checks[n] == 'unknown'):
+                    up_list.append(provider_url)
+                elif (cost_checks[n] == 'good' and refunds_checks[n] == 'success'):
+                    provider_url = provider_url + " (✅ Refund checked) "
+                    up_list.append(provider_url)
+                else:
+                    if cost_checks[n] != 'good':
+                        provider_url = provider_url + f" (⚠️ Warning: Cost check failed! ${cost_checks[n].split(' ')} difference) "
+                    if refunds_checks[n] == 'failed':
+                        provider_url = provider_url + " (🔴 Refund failed) "
+                    warning_list.append(provider_url)
 
-        event_content = ("✅ Providers working as expected:" + "\n".join(up_list)) if len(up_list) > 0 else ""
-        event_content += ("🔴 Providers with issues:" + "\n".join(down_list)) if len(down_list) > 0 else ""
-        event_content += "\nProof: \nA recent Nostr note: '" + note_content + "'\nNote ID: "+ latest_event.bech32() + "\n\nAI responses: \n" + proofs
+        event_content = ("✅ Providers working as expected:" + "\n " + "\n ".join(up_list)) if len(up_list) > 0 else ""
+        event_content += ("\n🔴 Providers with issues:" + "\n `" +"`\n `".join(down_list) + "`") if len(down_list) > 0 else ""
+        event_content += "\n\nProof \n\nA recent Nostr note: \n'" + note_content + "'\nNote ID: "+ latest_event.bech32() + "\n\nAIs responses: \n" + proofs
 
-        new_event_id = await publish_nostr_event(event_content+"nostr:"+latest_event.bech32(), tags)
+        print(event_content)
+        # new_event_id = await publish_nostr_event(event_content+"nostr:"+latest_event.bech32(), tags)
 
-        if new_event_id:
-            print(f"Published new status event: {new_event_id}")
-            # Save status for reference (keeping this for backward compatibility)
-        else:
-            print("Failed to publish Nostr event.")
-
+        # if new_event_id:
+        #     print(f"Published new status event: {new_event_id}")
+        #     # Save status for reference (keeping this for backward compatibility)
+        # else:
+        #     print("Failed to publish Nostr event.")
 
     else:
         print("NOSTR DIDN'T WOWKR")
