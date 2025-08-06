@@ -193,6 +193,7 @@ async def get_witty_bitcoin_comment(note_content: str, custom_addon: str, provid
     model_id = "Not available"
     cost_check = 'unknown' 
     refund_status = 'unknown'
+    version = 'unknwon'
 
     try:
         # Create AI prompt including the latest event content if available
@@ -207,15 +208,16 @@ async def get_witty_bitcoin_comment(note_content: str, custom_addon: str, provid
             # API is working, extract AI response content
             try:
                 provider_data = response.json()
+                version = provider_data['version']
                 if 'models' in provider_data and provider_data['models']:
                     models_data = provider_data['models']
             except json.JSONDecodeError:
                 models_data = {}
                 print(f"Could not decode models data from JSON. Provider URL: {provider_url}")
-                return ai_response_content, current_status, model_id, cost_check, refund_status
+                return ai_response_content, current_status, model_id, cost_check, refund_status, version
         else:
             print(f"API returned non-OK status: {response.status_code}. Provider URL: {provider_url}")
-            return ai_response_content, current_status, model_id, cost_check, refund_status
+            return ai_response_content, current_status, model_id, cost_check, refund_status, version
 
         models_count = len(models_data)
         model = get_cheapest_model_above_price(models_data, CHEAPEST_MODELS_ABOVE, DEFAULT_MAX_COSTS_RANGE, True)
@@ -343,7 +345,7 @@ async def get_witty_bitcoin_comment(note_content: str, custom_addon: str, provid
         print(f"Routstr API unreachable: {e}")
         current_status = "down"
     
-    return ai_response_content, current_status, model_id, cost_check, refund_status
+    return ai_response_content, current_status, model_id, cost_check, refund_status, version
 
 async def publish_nostr_event(event_content: str, tags: list[list[str]] = None, relay_manager: RelayManager = None) -> str | None:
     """Publishes a Nostr event to configured relays."""
@@ -421,7 +423,7 @@ async def main():
 
         # for n in range(len(proxies)):
         for n in range(NUMBER_OF_PROXIES_TO_TEST):
-            ai_response_content, current_status, model_id, cost_check, refund_status = await get_witty_bitcoin_comment(
+            ai_response_content, current_status, model_id, cost_check, refund_status, version = await get_witty_bitcoin_comment(
                 note_content, PROMPTS[n], 
                 PROXIES[n]
                 )
@@ -446,9 +448,10 @@ async def main():
         warning_list = []
         for n, s in enumerate(statuses):
             if s == "down":
-                down_list.append(PROXIES[n])
+                provider_url = '`' + PROXIES[n] + f'` (${version})'
+                down_list.append(provider_url)
             else:
-                provider_url = '`' + PROXIES[n] + '`'
+                provider_url = '`' + PROXIES[n] + f'` (${version})'
                 if (cost_checks[n] == 'good' and refunds_checks[n] == 'unknown'):
                     up_list.append(provider_url)
                 elif (cost_checks[n] == 'good' and refunds_checks[n] == 'success'):
@@ -462,7 +465,7 @@ async def main():
                     warning_list.append(provider_url)
 
         event_content = ("✅ Providers working as expected:" + "\n " + "\n ".join(up_list)) if len(up_list) > 0 else ""
-        event_content += ("\n🔴 Providers with issues:" + "\n `" +"`\n `".join(down_list) + "`") if len(down_list) > 0 else ""
+        event_content += ("\n🔴 Providers with issues:" + "\n " +"\n ".join(down_list)) if len(down_list) > 0 else ""
         event_content += "\n\nProof \n\nA recent Nostr note: \n'" + note_content + "'\nNote ID: "+ latest_event.bech32() + "\n\nAIs responses: \n" + proofs
 
         print(event_content)
