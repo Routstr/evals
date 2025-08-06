@@ -448,10 +448,10 @@ async def main():
         warning_list = []
         for n, s in enumerate(statuses):
             if s == "down":
-                provider_url = '`' + PROXIES[n] + f'` (${version})'
+                provider_url = '`' + PROXIES[n] + f'` ({version})'
                 down_list.append(provider_url)
             else:
-                provider_url = '`' + PROXIES[n] + f'` (${version})'
+                provider_url = '`' + PROXIES[n] + f'` ({version})'
                 if (cost_checks[n] == 'good' and refunds_checks[n] == 'unknown'):
                     up_list.append(provider_url)
                 elif (cost_checks[n] == 'good' and refunds_checks[n] == 'success'):
@@ -459,7 +459,7 @@ async def main():
                     up_list.append(provider_url)
                 else:
                     if cost_checks[n] != 'good':
-                        provider_url = provider_url + f" (⚠️ Warning: Cost check failed! ${cost_checks[n].split(' ')} difference) "
+                        provider_url = provider_url + f" (⚠️ Warning: Cost check failed! {cost_checks[n].split(' ')} difference) "
                     if refunds_checks[n] == 'failed':
                         provider_url = provider_url + " (🔴 Refund failed) "
                     warning_list.append(provider_url)
