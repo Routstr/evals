@@ -44,7 +44,7 @@ PROMPTS = [
     " Bitcoin relates to it. "
 ]
 CHEAPEST_MODELS_ABOVE=5
-NUMBER_OF_PROXIES_TO_TEST=2
+NUMBER_OF_PROXIES_TO_TEST=4
 DEFAULT_MAX_COSTS_RANGE=10
 # --- Data Management Functions ---
 
@@ -420,6 +420,7 @@ async def main():
         proofs = ""
         refunds_checks = []
         cost_checks = []
+        versions = []
 
         # for n in range(len(proxies)):
         for n in range(NUMBER_OF_PROXIES_TO_TEST):
@@ -429,6 +430,7 @@ async def main():
                 )
             cost_checks.append(cost_check)
             refunds_checks.append(refund_status)
+            versions.append(version)
             # Generate event content (use AI response if available, otherwise fallback to generated comment)
             if ai_response_content:
                 proofs = proofs + ai_response_content + "\nFrom provider: "+ PROXIES[n].replace("http://","").replace("https://","") + " (" + model_id + ") \n"+"\n"
@@ -448,10 +450,10 @@ async def main():
         warning_list = []
         for n, s in enumerate(statuses):
             if s == "down":
-                provider_url = '`' + PROXIES[n] + f'` ({version})'
+                provider_url = '`' + PROXIES[n] + f'` ({versions[n]})'
                 down_list.append(provider_url)
             else:
-                provider_url = '`' + PROXIES[n] + f'` ({version})'
+                provider_url = '`' + PROXIES[n] + f'` ({versions[n]})'
                 if (cost_checks[n] == 'good' and refunds_checks[n] == 'unknown'):
                     up_list.append(provider_url)
                 elif (cost_checks[n] == 'good' and refunds_checks[n] == 'success'):
@@ -459,13 +461,14 @@ async def main():
                     up_list.append(provider_url)
                 else:
                     if cost_checks[n] != 'good':
-                        provider_url = provider_url + f" (⚠️ Warning: Cost check failed! {cost_checks[n].split(' ')} difference) "
+                        provider_url = provider_url + f" (⚠️ Warning: Cost check failed! {cost_checks[n].split(' ')[1]} difference) "
                     if refunds_checks[n] == 'failed':
                         provider_url = provider_url + " (🔴 Refund failed) "
                     warning_list.append(provider_url)
 
         event_content = ("✅ Providers working as expected:" + "\n " + "\n ".join(up_list)) if len(up_list) > 0 else ""
-        event_content += ("\n🔴 Providers with issues:" + "\n " +"\n ".join(down_list)) if len(down_list) > 0 else ""
+        event_content += ("\n⚠️ Providers with issues:" + "\n " +"\n ".join(warning_list)) if len(warning_list) > 0 else ""
+        event_content += ("\n🔴 Providers that are down:" + "\n " +"\n ".join(down_list)) if len(down_list) > 0 else ""
         event_content += "\n\nProof \n\nA recent Nostr note: \n'" + note_content + "'\nNote ID: "+ latest_event.bech32() + "\n\nAIs responses: \n" + proofs
 
         print(event_content)
