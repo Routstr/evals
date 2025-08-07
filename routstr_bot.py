@@ -470,7 +470,7 @@ async def main():
         event_content = ("✅ Providers working as expected:" + "\n " + "\n ".join(up_list)) if len(up_list) > 0 else ""
         event_content += ("\n⚠️ Providers with issues:" + "\n " +"\n ".join(warning_list)) if len(warning_list) > 0 else ""
         event_content += ("\n🔴 Providers that are down:" + "\n " +"\n ".join(down_list)) if len(down_list) > 0 else ""
-        event_content += "\n\nProof \n\nA recent Nostr note: \n'" + note_content + "'\nNote ID: "+ latest_event.bech32() + "\n\nAIs responses: \n" + proofs
+        event_content += "\n\nProof \n\nA recent Nostr note: \n'" + latest_event.content + "'\nNote ID: "+ latest_event.bech32() + "\n\nAIs responses: \n" + proofs
 
         if (PRODUCTION=='true'):
             new_event_id = await publish_nostr_event(event_content+"nostr:"+latest_event.bech32(), tags)
