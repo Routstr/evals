@@ -395,6 +395,7 @@ async def publish_nostr_event(event_content: str, tags: list[list[str]] = None, 
 # --- Main Logic ---
 
 async def main():
+    print('\nLogging: ', time.asctime())
     if not NOSTR_BOT_NSEC:
         print("NOSTR_BOT_NSEC not set, cannot query latest relay event.")
         return
